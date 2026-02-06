@@ -1,117 +1,112 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-// 1. FIX: Correct import path for OpenZeppelin v5
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "forge-std/Test.sol";
+import "../src/Airdrop.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
-/// @title Gas-efficient Merkle Airdrop
-/// @notice Index-based leaves: keccak256(abi.encodePacked(index, account, amount))
-contract Airdrop is Ownable, ReentrancyGuard {
-    IERC20 public immutable token;
-    bytes32 public merkleRoot;
-    uint256 public claimDeadline; // timestamp after which claims are closed
+// Simple Mock Token for testing
+contract TokenMock is ERC20 {
+    constructor() ERC20("Mock Token", "MKT") {}
 
-    // packed claimed bitmap: index => bit (index / 256 => word index)
-    mapping(uint256 => uint256) private claimedBitMap;
-
-    event Claimed(address indexed account, uint256 indexed index, uint256 amount);
-    event BatchClaimed(address indexed account, uint256 totalAmount, uint256[] indexes);
-    event MerkleRootUpdated(bytes32 newRoot);
-    event EmergencyWithdraw(address indexed to, uint256 amount);
-
-    error AlreadyClaimed(uint256 index);
-    error InvalidProof();
-    error ClaimPeriodOver();
-    error NothingToWithdraw();
-
-    constructor(address _token, bytes32 _merkleRoot, uint256 _claimDurationSeconds, address initialOwner)
-        Ownable(initialOwner) // 2. FIX: Correct Ownable v5 constructor
-    {
-        token = IERC20(_token);
-        merkleRoot = _merkleRoot;
-        claimDeadline = block.timestamp + _claimDurationSeconds;
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
     }
+}
 
-    /// @notice Returns true if the `index` has been claimed.
-    function isClaimed(uint256 index) public view returns (bool) {
-        uint256 wordIndex = index >> 8; // index / 256
-        uint256 bitIndex = index & 255; // index % 256
-        uint256 word = claimedBitMap[wordIndex];
-        return (word >> bitIndex) & 1 == 1;
-    }
+contract AirdropTest is Test {
+    TokenMock token;
+    Airdrop airdrop;
 
-    /// @dev mark an index as claimed
-    function _setClaimed(uint256 index) internal {
-        uint256 wordIndex = index >> 8;
-        uint256 bitIndex = index & 255;
-        claimedBitMap[wordIndex] = claimedBitMap[wordIndex] | (1 << bitIndex);
-    }
+    address user = address(0x1);
+    address owner = address(this);
 
-    /// @notice Claim a single index. `leaf` is computed as keccak256(abi.encodePacked(index, msg.sender, amount))
-    function claim(uint256 index, uint256 amount, bytes32[] calldata merkleProof) external nonReentrant {
-        if (block.timestamp > claimDeadline) revert ClaimPeriodOver();
-        if (isClaimed(index)) revert AlreadyClaimed(index);
+    // Merkle Tree Storage
+    bytes32[] leaves;
+    bytes32 root;
 
-        bytes32 leaf = keccak256(abi.encodePacked(index, msg.sender, amount));
-        if (!MerkleProof.verify(merkleProof, merkleRoot, leaf)) {
-            revert InvalidProof();
+    // Test Data
+    uint256 amount1 = 100;
+    uint256 amount2 = 50;
+
+    function setUp() public {
+        token = new TokenMock();
+        token.mint(address(this), 1000);
+
+        // ----------------------------------------------------
+        // 1. GENERATE MERKLE DATA (Manual for 2 leaves)
+        // ----------------------------------------------------
+        // We will create 2 claims for the SAME user (user)
+        // to test both single claim and batch claim.
+
+        leaves = new bytes32[](2);
+
+        // Leaf 0: Index 0, User, Amount 100
+        // MUST match Airdrop.sol: keccak256(abi.encodePacked(idx, msg.sender, amount))
+        leaves[0] = keccak256(abi.encodePacked(uint256(0), user, amount1));
+
+        // Leaf 1: Index 1, User, Amount 50
+        leaves[1] = keccak256(abi.encodePacked(uint256(1), user, amount2));
+
+        // Generate Root: Sort the leaves and hash them together
+        // (OpenZeppelin's MerkleProof sorts pairs before hashing)
+        if (uint256(leaves[0]) < uint256(leaves[1])) {
+            root = keccak256(abi.encodePacked(leaves[0], leaves[1]));
+        } else {
+            root = keccak256(abi.encodePacked(leaves[1], leaves[0]));
         }
 
-        _setClaimed(index);
-        token.transfer(msg.sender, amount);
+        // ----------------------------------------------------
+        // 2. DEPLOY AIRDROP
+        // ----------------------------------------------------
+        airdrop = new Airdrop(address(token), root, 1 days, owner);
 
-        emit Claimed(msg.sender, index, amount);
+        // Fund the Airdrop contract
+        token.transfer(address(airdrop), 500);
     }
 
-    /// @notice Batch claim several indexes for the same msg.sender
-    /// @param indexes array of indexes
-    /// @param amounts array of amounts (must match indexes length)
-    /// @param proofs array of INDEPENDENT merkle proofs per index (each is bytes32[])
-    function batchClaim(uint256[] calldata indexes, uint256[] calldata amounts, bytes32[][] calldata proofs)
-        external
-        nonReentrant
-    {
-        if (block.timestamp > claimDeadline) revert ClaimPeriodOver();
-        require(indexes.length == amounts.length && indexes.length == proofs.length, "Array length mismatch");
+    function testClaim() public {
+        // Prepare Proof for Leaf 0
+        // Since we only have 2 leaves, the proof for Leaf 0 is just Leaf 1
+        bytes32[] memory proof = new bytes32[](1);
+        proof[0] = leaves[1];
 
-        uint256 total = 0;
-        uint256 len = indexes.length;
+        vm.startPrank(user);
 
-        for (uint256 i = 0; i < len; i++) {
-            uint256 idx = indexes[i];
+        // Claim Index 0
+        airdrop.claim(0, amount1, proof);
 
-            if (isClaimed(idx)) continue; // skip already claimed indices
-
-            bytes32 leaf = keccak256(abi.encodePacked(idx, msg.sender, amounts[i]));
-            if (!MerkleProof.verify(proofs[i], merkleRoot, leaf)) {
-                revert InvalidProof();
-            }
-
-            _setClaimed(idx);
-            total += amounts[i];
-        }
-
-        require(total > 0, "Nothing to claim");
-        token.transfer(msg.sender, total);
-
-        emit BatchClaimed(msg.sender, total, indexes);
+        assertEq(token.balanceOf(user), 100);
+        assertTrue(airdrop.isClaimed(0));
+        vm.stopPrank();
     }
 
-    /// @notice Owner can update Merkle root (useful for staged waves)
-    function updateMerkleRoot(bytes32 newRoot) external onlyOwner {
-        merkleRoot = newRoot;
-        emit MerkleRootUpdated(newRoot);
-    }
+    function testBatchClaim() public {
+        // Prepare Arrays
+        uint256[] memory indexes = new uint256[](2);
+        uint256[] memory amounts = new uint256[](2);
+        bytes32[][] memory proofs = new bytes32[][](2);
 
-    /// @notice After the claim deadline, owner can withdraw leftover tokens
-    function emergencyWithdraw(address to) external onlyOwner {
-        if (block.timestamp <= claimDeadline) revert ClaimPeriodOver();
-        uint256 bal = token.balanceOf(address(this));
-        if (bal == 0) revert NothingToWithdraw();
-        token.transfer(to, bal);
-        emit EmergencyWithdraw(to, bal);
+        // Data for Index 0
+        indexes[0] = 0;
+        amounts[0] = amount1;
+        proofs[0] = new bytes32[](1);
+        proofs[0][0] = leaves[1]; // Proof for Leaf 0 is Leaf 1
+
+        // Data for Index 1
+        indexes[1] = 1;
+        amounts[1] = amount2;
+        proofs[1] = new bytes32[](1);
+        proofs[1][0] = leaves[0]; // Proof for Leaf 1 is Leaf 0
+
+        vm.startPrank(user);
+
+        airdrop.batchClaim(indexes, amounts, proofs);
+
+        // User should have 100 + 50 = 150 tokens
+        assertEq(token.balanceOf(user), 150);
+        assertTrue(airdrop.isClaimed(0));
+        assertTrue(airdrop.isClaimed(1));
+        vm.stopPrank();
     }
 }
