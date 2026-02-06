@@ -19,12 +19,7 @@ contract DeployAirdrop is Script {
         ERC20Mock token = new ERC20Mock(msg.sender);
 
         // Deploy airdrop contract
-        Airdrop airdrop = new Airdrop(
-            address(token),
-            merkleRoot,
-            claimDuration,
-            msg.sender
-        );
+        Airdrop airdrop = new Airdrop(address(token), merkleRoot, claimDuration, msg.sender);
 
         // Mint tokens into the airdrop contract -- update to the sum printed by the generator
         uint256 totalAirdropAmount = 500; // replace with generator totalAmount

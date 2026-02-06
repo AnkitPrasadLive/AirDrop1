@@ -17,16 +17,8 @@ contract Airdrop is Ownable, ReentrancyGuard {
     // packed claimed bitmap: index => bit (index / 256 => word index)
     mapping(uint256 => uint256) private claimedBitMap;
 
-    event Claimed(
-        address indexed account,
-        uint256 indexed index,
-        uint256 amount
-    );
-    event BatchClaimed(
-        address indexed account,
-        uint256 totalAmount,
-        uint256[] indexes
-    );
+    event Claimed(address indexed account, uint256 indexed index, uint256 amount);
+    event BatchClaimed(address indexed account, uint256 totalAmount, uint256[] indexes);
     event MerkleRootUpdated(bytes32 newRoot);
     event EmergencyWithdraw(address indexed to, uint256 amount);
 
@@ -35,12 +27,7 @@ contract Airdrop is Ownable, ReentrancyGuard {
     error ClaimPeriodOver();
     error NothingToWithdraw();
 
-    constructor(
-        address _token,
-        bytes32 _merkleRoot,
-        uint256 _claimDurationSeconds,
-        address initialOwner
-    )
+    constructor(address _token, bytes32 _merkleRoot, uint256 _claimDurationSeconds, address initialOwner)
         Ownable(initialOwner) // 2. FIX: Correct Ownable v5 constructor
     {
         token = IERC20(_token);
@@ -64,17 +51,14 @@ contract Airdrop is Ownable, ReentrancyGuard {
     }
 
     /// @notice Claim a single index. `leaf` is computed as keccak256(abi.encodePacked(index, msg.sender, amount))
-    function claim(
-        uint256 index,
-        uint256 amount,
-        bytes32[] calldata merkleProof
-    ) external nonReentrant {
+    function claim(uint256 index, uint256 amount, bytes32[] calldata merkleProof) external nonReentrant {
         if (block.timestamp > claimDeadline) revert ClaimPeriodOver();
         if (isClaimed(index)) revert AlreadyClaimed(index);
 
         bytes32 leaf = keccak256(abi.encodePacked(index, msg.sender, amount));
-        if (!MerkleProof.verify(merkleProof, merkleRoot, leaf))
+        if (!MerkleProof.verify(merkleProof, merkleRoot, leaf)) {
             revert InvalidProof();
+        }
 
         _setClaimed(index);
         token.transfer(msg.sender, amount);
@@ -86,16 +70,12 @@ contract Airdrop is Ownable, ReentrancyGuard {
     /// @param indexes array of indexes
     /// @param amounts array of amounts (must match indexes length)
     /// @param proofs array of INDEPENDENT merkle proofs per index (each is bytes32[])
-    function batchClaim(
-        uint256[] calldata indexes,
-        uint256[] calldata amounts,
-        bytes32[][] calldata proofs
-    ) external nonReentrant {
+    function batchClaim(uint256[] calldata indexes, uint256[] calldata amounts, bytes32[][] calldata proofs)
+        external
+        nonReentrant
+    {
         if (block.timestamp > claimDeadline) revert ClaimPeriodOver();
-        require(
-            indexes.length == amounts.length && indexes.length == proofs.length,
-            "Array length mismatch"
-        );
+        require(indexes.length == amounts.length && indexes.length == proofs.length, "Array length mismatch");
 
         uint256 total = 0;
         uint256 len = indexes.length;
@@ -105,11 +85,10 @@ contract Airdrop is Ownable, ReentrancyGuard {
 
             if (isClaimed(idx)) continue; // skip already claimed indices
 
-            bytes32 leaf = keccak256(
-                abi.encodePacked(idx, msg.sender, amounts[i])
-            );
-            if (!MerkleProof.verify(proofs[i], merkleRoot, leaf))
+            bytes32 leaf = keccak256(abi.encodePacked(idx, msg.sender, amounts[i]));
+            if (!MerkleProof.verify(proofs[i], merkleRoot, leaf)) {
                 revert InvalidProof();
+            }
 
             _setClaimed(idx);
             total += amounts[i];
