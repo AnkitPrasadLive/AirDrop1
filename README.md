@@ -1,6 +1,4 @@
-Perfect! I can create a **readme for your Airdrop project** using the same template style as your NFTmint example. Here’s a clean version:
 
----
 
 # AirDrop 🎁 – Gas-Efficient ERC20 Merkle Airdrop
 
